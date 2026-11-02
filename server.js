@@ -6,15 +6,23 @@ const cors = require('cors');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+console.log("Starting Phoenix server initialization...");
+
 const DB_FILE = path.join(__dirname, 'users.json');
 const BANS_FILE = path.join(__dirname, 'banned_ips.json');
+const PUBLIC_DIR = path.join(__dirname, 'public');
 
-// Ensure JSON stores exist
-if (!fs.existsSync(DB_FILE)) {
-    fs.writeFileSync(DB_FILE, JSON.stringify([]));
-}
-if (!fs.existsSync(BANS_FILE)) {
-    fs.writeFileSync(BANS_FILE, JSON.stringify([]));
+// Ensure JSON stores exist safely
+try {
+    if (!fs.existsSync(DB_FILE)) {
+        fs.writeFileSync(DB_FILE, JSON.stringify([]));
+    }
+    if (!fs.existsSync(BANS_FILE)) {
+        fs.writeFileSync(BANS_FILE, JSON.stringify([]));
+    }
+    console.log("Database files verified.");
+} catch (err) {
+    console.error("Error setting up database files:", err);
 }
 
 // Helper functions
@@ -44,10 +52,14 @@ function saveBannedIPs(bans) {
 
 // Middleware to check IP bans
 app.use((req, res, next) => {
-    const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-    const bannedIps = getBannedIPs();
-    if (bannedIps.includes(clientIp)) {
-        return res.status(403).send('<h1>403 Forbidden - Your IP has been blocked from Phoenix.</h1>');
+    try {
+        const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+        const bannedIps = getBannedIPs();
+        if (bannedIps.includes(clientIp)) {
+            return res.status(403).send('<h1>403 Forbidden - Your IP has been blocked from Phoenix.</h1>');
+        }
+    } catch (e) {
+        // Ignore IP check errors to prevent crash
     }
     next();
 });
@@ -56,8 +68,16 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Serve Public Music Client at /music
-app.use('/music', express.static(path.join(__dirname, 'public')));
+// Serve Public Music Client at /music (with check if folder exists)
+if (fs.existsSync(PUBLIC_DIR)) {
+    app.use('/music', express.static(PUBLIC_DIR));
+    console.log("Serving static public files from /public");
+} else {
+    console.warn("Warning: 'public' directory not found! Creating fallback route.");
+    app.get('/music', (req, res) => {
+        res.send("<h1>Public folder missing on deployment. Please upload the public folder.</h1>");
+    });
+}
 
 // Serve Accounts UI at /accounts
 app.get('/accounts', (req, res) => {
@@ -201,20 +221,24 @@ app.get('/accounts/adminlog', (req, res) => {
 
     <script>
         async function loadTokens() {
-            const res = await fetch('/accounts/api/tokens');
-            const data = await res.json();
-            const list = document.getElementById('tokens-list');
-            if (!data.length) {
-                list.innerHTML = '<span class="text-gray-500">No active account tokens found.</span>';
-                return;
+            try {
+                const res = await fetch('/accounts/api/tokens');
+                const data = await res.json();
+                const list = document.getElementById('tokens-list');
+                if (!data.length) {
+                    list.innerHTML = '<span class="text-gray-500">No active account tokens found.</span>';
+                    return;
+                }
+                list.innerHTML = data.map(t => \`
+                    <div class="flex justify-between bg-gray-900 p-2 rounded border border-gray-700">
+                        <div><span class="text-orange-400 font-bold">TOKEN:</span> \${t.token}</div>
+                        <div><span class="text-gray-400">Created:</span> \${t.createdAt}</div>
+                        <div><span class="text-gray-400">IP:</span> \${t.lastIp}</div>
+                    </div>
+                \`).join('');
+            } catch(e) {
+                document.getElementById('tokens-list').innerHTML = '<span class="text-red-400">Error loading tokens.</span>';
             }
-            list.innerHTML = data.map(t => `
-                <div class="flex justify-between bg-gray-900 p-2 rounded border border-gray-700">
-                    <div><span class="text-orange-400 font-bold">TOKEN:</span> ${t.token}</div>
-                    <div><span class="text-gray-400">Created:</span> ${t.createdAt}</div>
-                    <div><span class="text-gray-400">IP:</span> ${t.lastIp}</div>
-                </div>
-            `).join('');
         }
 
         async function runCommand() {
@@ -241,78 +265,96 @@ app.get('/accounts/adminlog', (req, res) => {
 
 // API Endpoints
 app.post('/accounts/api/signup', (req, res) => {
-    const { name, email, password } = req.body;
-    if (!name || !email || !password) return res.status(400).json({ error: 'All fields required' });
+    try {
+        const { name, email, password } = req.body;
+        if (!name || !email || !password) return res.status(400).json({ error: 'All fields required' });
 
-    const users = getUsers();
-    if (users.find(u => u.email.toLowerCase() === email.toLowerCase())) {
-        return res.status(400).json({ error: 'Account already exists' });
+        const users = getUsers();
+        if (users.find(u => u.email.toLowerCase() === email.toLowerCase())) {
+            return res.status(400).json({ error: 'Account already exists' });
+        }
+
+        const token = 'tok_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6);
+        const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+
+        const newUser = {
+            token,
+            name,
+            email: email.toLowerCase(),
+            password,
+            lastIp: clientIp,
+            createdAt: new Date().toISOString()
+        };
+
+        users.push(newUser);
+        saveUsers(users);
+
+        res.json({ message: 'Account created', token, user: { name: newUser.name } });
+    } catch (err) {
+        res.status(500).json({ error: 'Server error during signup' });
     }
-
-    const token = 'tok_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6);
-    const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-
-    const newUser = {
-        token,
-        name,
-        email: email.toLowerCase(),
-        password,
-        lastIp: clientIp,
-        createdAt: new Date().toISOString()
-    };
-
-    users.push(newUser);
-    saveUsers(users);
-
-    res.json({ message: 'Account created', token, user: { name: newUser.name } });
 });
 
 app.post('/accounts/api/login', (req, res) => {
-    const { email, password } = req.body;
-    const users = getUsers();
-    const user = users.find(u => u.email.toLowerCase() === email.toLowerCase() && u.password === password);
+    try {
+        const { email, password } = req.body;
+        const users = getUsers();
+        const user = users.find(u => u.email.toLowerCase() === email.toLowerCase() && u.password === password);
 
-    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+        if (!user) return res.status(401).json({ error: 'Invalid credentials' });
 
-    user.lastIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-    saveUsers(users);
+        user.lastIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+        saveUsers(users);
 
-    res.json({ message: 'Login successful', token: user.token, user: { name: user.name } });
+        res.json({ message: 'Login successful', token: user.token, user: { name: user.name } });
+    } catch (err) {
+        res.status(500).json({ error: 'Server error during login' });
+    }
 });
 
 app.get('/accounts/api/tokens', (req, res) => {
-    const users = getUsers();
-    res.json(users.map(u => ({
-        token: u.token,
-        createdAt: u.createdAt,
-        lastIp: u.lastIp
-    })));
+    try {
+        const users = getUsers();
+        res.json(users.map(u => ({
+            token: u.token,
+            createdAt: u.createdAt,
+            lastIp: u.lastIp
+        })));
+    } catch (e) {
+        res.status(500).json([]);
+    }
 });
 
 app.post('/accounts/api/admin-action', (req, res) => {
-    const { command } = req.body;
-    if (!command || !command.startsWith('BAN ')) {
-        return res.status(400).json({ error: 'Invalid command. Format: BAN [TOKEN]' });
+    try {
+        const { command } = req.body;
+        if (!command || !command.startsWith('BAN ')) {
+            return res.status(400).json({ error: 'Invalid command. Format: BAN [TOKEN]' });
+        }
+
+        const tokenToBan = command.replace('BAN ', '').trim();
+        let users = getUsers();
+        const targetUser = users.find(u => u.token === tokenToBan);
+
+        if (!targetUser) {
+            return res.status(404).json({ error: 'Token not found.' });
+        }
+
+        const bannedIps = getBannedIPs();
+        if (targetUser.lastIp && !bannedIps.includes(targetUser.lastIp)) {
+            bannedIps.push(targetUser.lastIp);
+            saveBannedIPs(bannedIps);
+        }
+
+        users = users.filter(u => u.token !== tokenToBan);
+        saveUsers(users);
+
+        res.json({ message: `Successfully deregistered token ${tokenToBan} and IP banned address ${targetUser.lastIp}` });
+    } catch (e) {
+        res.status(500).json({ error: 'Server error executing command' });
     }
-
-    const tokenToBan = command.replace('BAN ', '').trim();
-    let users = getUsers();
-    const targetUser = users.find(u => u.token === tokenToBan);
-
-    if (!targetUser) {
-        return res.status(404).json({ error: 'Token not found.' });
-    }
-
-    const bannedIps = getBannedIPs();
-    if (targetUser.lastIp && !bannedIps.includes(targetUser.lastIp)) {
-        bannedIps.push(targetUser.lastIp);
-        saveBannedIPs(bannedIps);
-    }
-
-    users = users.filter(u => u.token !== tokenToBan);
-    saveUsers(users);
-
-    res.json({ message: `Successfully deregistered token ${tokenToBan} and IP banned address ${targetUser.lastIp}` });
 });
 
-app.listen(PORT, () => console.log(`Phoenix server running on port ${PORT}`));
+app.listen(PORT, () => {
+    console.log(`Phoenix server successfully listening on port ${PORT}`);
+});
