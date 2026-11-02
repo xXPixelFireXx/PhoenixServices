@@ -1,7 +1,7 @@
 {
-  "name": "phoenix-play-music",
-  "version": "1.0.0",
-  "description": "Phoenix Platform",
+  "name": "phoenix-platform",
+  "version": "11.2.26",
+  "description": "Phoenix Public Audio Platform",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "cors": "^2.8.5",
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "multer": "^1.4.5-lts.1"
   }
 }
